@@ -1,0 +1,50 @@
+"""Application configuration and settings."""
+
+from functools import lru_cache
+
+from pydantic import field_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    """Application settings loaded from environment variables and .env file."""
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
+
+    APP_NAME: str = "AI Viva Voce System"
+    DEBUG: bool = False
+    API_V1_STR: str = "/api"
+
+    # Security
+    SECRET_KEY: str = "temporary-dev-secret-key-change-in-production-12345"
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24  # 24 hours
+
+    # Database
+    DATABASE_URL: str = "sqlite+aiosqlite:///./viva.db"
+
+    # CORS
+    CORS_ORIGINS: list[str] | str = ["http://localhost:5173", "http://127.0.0.1:5173"]
+
+    # Optional integrations
+    GEMINI_API_KEY: str | None = None
+    OLLAMA_BASE_URL: str = "http://localhost:11434"
+
+    @field_validator("CORS_ORIGINS", mode="before")
+    @classmethod
+    def assemble_cors_origins(cls, v: str | list[str]) -> list[str]:
+        """Convert comma-separated strings to list of origins."""
+        if isinstance(v, str) and not v.startswith("["):
+            return [i.strip() for i in v.split(",") if i.strip()]
+        elif isinstance(v, (list, str)):
+            return v  # type: ignore[return-value]
+        raise ValueError(f"Invalid CORS_ORIGINS format: {v}")
+
+
+@lru_cache
+def get_settings() -> Settings:
+    """Return a cached singleton instance of application settings."""
+    return Settings()
