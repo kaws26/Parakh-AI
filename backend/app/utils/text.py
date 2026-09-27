@@ -14,7 +14,11 @@ def clean_transcript(text: str) -> str:
     for filler in sorted(FILLER_WORDS, key=len, reverse=True):
         cleaned = re.sub(rf"\b{re.escape(filler)}\b", "", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"\s+([,.;:!?])", r"\1", cleaned)
-    cleaned = re.sub(r"(?<!^)(?<!\.\s)(?<!\?\s)(?<!!\s)([A-Za-z])([A-Za-z]+)", lambda m: m.group(1).upper() + m.group(2) if m.group(1).isalpha() else m.group(0), cleaned)
+    cleaned = re.sub(
+        r"(?<!^)(?<!\.\s)(?<!\?\s)(?<!!\s)([A-Za-z])([A-Za-z]+)",
+        lambda m: m.group(1).upper() + m.group(2) if m.group(1).isalpha() else m.group(0),
+        cleaned,
+    )
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
     if cleaned and not cleaned.endswith((".", "!", "?")):
         cleaned += "."

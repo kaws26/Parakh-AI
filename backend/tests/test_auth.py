@@ -26,8 +26,8 @@ async def test_register_student_success(client: AsyncClient) -> None:
 
 
 @pytest.mark.asyncio
-async def test_register_teacher_success(client: AsyncClient) -> None:
-    """Verify that a teacher can register."""
+async def test_public_registration_rejects_teacher_role(client: AsyncClient) -> None:
+    """Public registration must not let a user grant themselves teacher access."""
     response = await client.post(
         "/api/auth/register",
         json={
@@ -37,9 +37,8 @@ async def test_register_teacher_success(client: AsyncClient) -> None:
             "role": "teacher",
         },
     )
-    assert response.status_code == 201
-    data = response.json()
-    assert data["user"]["role"] == "teacher"
+    assert response.status_code == 403
+    assert "student" in response.json()["detail"].lower()
 
 
 @pytest.mark.asyncio

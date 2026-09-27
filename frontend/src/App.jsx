@@ -1,83 +1,37 @@
-import { useState, useEffect } from 'react'
-import { checkHealth } from './api/client'
+import { useEffect, useState } from 'react'
+import { AuthProvider, useAuth } from './hooks/useAuth'
+import Login from './pages/Login'
+import StudentDashboard from './pages/StudentDashboard'
+import TeacherDashboard from './pages/TeacherDashboard'
+import VivaScreen from './pages/VivaScreen'
+import FeedbackReport from './pages/FeedbackReport'
+import SessionReview from './pages/SessionReview'
+import QuestionBank from './pages/QuestionBank'
+import Landing from './pages/Landing'
+import Register from './pages/Register'
 import './App.css'
+import './call.css'
 
-function App() {
-  const [healthData, setHealthData] = useState(null)
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState(null)
-
-  const fetchHealth = async () => {
-    setLoading(true)
-    setError(null)
-    try {
-      const data = await checkHealth()
-      setHealthData(data)
-    } catch (err) {
-      setError(err.message || 'Failed to connect to backend service')
-    } finally {
-      setLoading(false)
-    }
+function Workspace() {
+  const { user, isAuthenticated, loading, logout } = useAuth(); const [route, setRoute] = useState(window.location.hash.slice(1) || '/')
+  const navigate = (path) => { window.location.hash = path }
+  useEffect(() => { const change = () => setRoute(window.location.hash.slice(1) || '/'); window.addEventListener('hashchange', change); return () => window.removeEventListener('hashchange', change) }, [])
+  if (loading) return <main className="loading-screen"><span className="spinner"/> Restoring your session…</main>
+  if (!isAuthenticated) {
+    if (route === '/login') return <Login navigate={navigate}/>
+    if (route === '/signup') return <Register navigate={navigate}/>
+    return <Landing navigate={navigate}/>
   }
-
-  useEffect(() => {
-    fetchHealth()
-  }, [])
-
-  return (
-    <main className="app-container">
-      <header className="app-header">
-        <div className="badge">AI-Based Viva Voce System</div>
-        <h1>Hello, Viva!</h1>
-        <p className="subtitle">
-          Automated oral examination platform with speech evaluation and RAG-powered assessment.
-        </p>
-      </header>
-
-      <section className="status-card">
-        <h2>System Status (Phase 0 Foundation)</h2>
-
-        {loading && (
-          <div className="status-loading">
-            <span className="spinner"></span> Checking backend &amp; database health...
-          </div>
-        )}
-
-        {error && (
-          <div className="status-error">
-            <p><strong>Connection Error:</strong> {error}</p>
-            <p className="hint">Ensure FastAPI backend is running on port 8000.</p>
-            <button className="btn" onClick={fetchHealth}>Retry Connection</button>
-          </div>
-        )}
-
-        {healthData && !loading && (
-          <div className="status-details">
-            <div className="status-row">
-              <span className="label">Backend Status:</span>
-              <span className="value badge-success">{healthData.status}</span>
-            </div>
-            <div className="status-row">
-              <span className="label">Database Status:</span>
-              <span className="value badge-success">{healthData.db}</span>
-            </div>
-            <div className="status-row">
-              <span className="label">Message:</span>
-              <span className="value message-text">{healthData.message}</span>
-            </div>
-
-            <button className="btn btn-refresh" onClick={fetchHealth}>
-              Refresh Health Check
-            </button>
-          </div>
-        )}
-      </section>
-
-      <footer className="app-footer">
-        <p>Phase 0: Setup &amp; Foundations Complete</p>
-      </footer>
-    </main>
-  )
+  const teacher = user?.role === 'teacher' || user?.role === 'admin'
+  if (!teacher && route.startsWith('/teacher')) navigate('/')
+  if (teacher && route === '/') navigate('/teacher')
+  let content
+  if (route === '/viva') content = <VivaScreen navigate={navigate}/>
+  else if (route.startsWith('/report/')) content = <FeedbackReport sessionId={route.split('/')[2]} navigate={navigate}/>
+  else if (route.startsWith('/review/')) content = <SessionReview sessionId={route.split('/')[2]} navigate={navigate}/>
+  else if (route === '/questions' && teacher) content = <QuestionBank/>
+  else if (teacher) content = <TeacherDashboard navigate={navigate}/>
+  else content = <StudentDashboard navigate={navigate}/>
+  return <><header className="site-nav"><button className="nav-brand" onClick={() => navigate(teacher?'/teacher':'/')}><span className="brand-mark small">V<span>.</span></span><span>viva<span className="nav-brand-light">practice</span></span></button><nav aria-label="Main navigation"><button onClick={() => navigate(teacher?'/teacher':'/')}>{teacher?'Sessions':'My courses'}</button>{teacher && <button onClick={() => navigate('/questions')}>Question bank</button>}</nav><div className="nav-user"><span>{user?.full_name}</span><button className="signout" onClick={() => { logout(); navigate('/login') }}>Sign out</button></div></header>{content}</>
 }
-
-export default App
+export default function App() { return <AuthProvider><Workspace/></AuthProvider> }

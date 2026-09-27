@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -15,8 +15,8 @@ from app.models.topic import Topic
 from app.models.user import User, UserRole
 from app.schemas.question import QuestionGenerateRequest, QuestionResponse, QuestionUpdate
 from app.services.document_service import DocumentService
-from app.services.question_service import LocalLLMProvider, QuestionService
-from app.services.rag_service import chunk_text
+from app.services.question_service import QuestionService
+from app.services.rag_service import chunk_text, retrieve_for_topic
 
 router = APIRouter(tags=["Questions"])
 
@@ -28,33 +28,50 @@ async def generate_questions_for_topic(
     current_user: User = Depends(require_role(UserRole.TEACHER, UserRole.ADMIN)),
     db: AsyncSession = Depends(get_db),
 ) -> list[QuestionResponse]:
-    """Generate a set of oral-exam questions from uploaded topic material."""
+    """Generate a set of oral-exam questions from uploaded topic material and RAG chunks."""
     topic_result = await db.execute(select(Topic).where(Topic.id == topic_id))
     topic = topic_result.scalar_one_or_none()
     if topic is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Topic not found")
 
     context_chunks: list[str] = []
-    document_result = await db.execute(select(Document).where(Document.topic_id == topic_id))
-    documents = document_result.scalars().all()
-    for document in documents:
-        file_path = document.file_path
-        try:
-            text = DocumentService.extract_text(document.filename, open(file_path, "rb").read())
-            context_chunks.extend(chunk_text(text, chunk_size=512, overlap=64))
-        except Exception:
-            continue
+
+    # First, try retrieving relevant chunks from the topic's FAISS index
+    indexed_chunks = retrieve_for_topic(
+        topic_id, query=f"Key concepts, topics, and definitions for {topic.name}", top_k=5
+    )
+    if indexed_chunks:
+        context_chunks.extend(item["text"] for item in indexed_chunks)
+    else:
+        # Fall back to extracting text directly from topic documents
+        document_result = await db.execute(select(Document).where(Document.topic_id == topic_id))
+        documents = document_result.scalars().all()
+        for document in documents:
+            file_path = document.file_path
+            try:
+                with open(file_path, "rb") as f:
+                    content_bytes = f.read()
+                text = DocumentService.extract_text(document.filename, content_bytes)
+                extracted_chunks = chunk_text(text, chunk_size=512, overlap=64)
+                context_chunks.extend(extracted_chunks[:5])
+            except Exception:
+                continue
 
     if not context_chunks:
-        context_chunks = [topic.name]
+        context_chunks = [
+            f"Course topic: {topic.name}. Oral examination questions testing core concepts."
+        ]
 
-    questions = await QuestionService().generate_questions(
-        topic_id=topic_id,
-        context_chunks=context_chunks,
-        count=payload.count,
-        llm_provider=LocalLLMProvider(),
-        db=db,
-    )
+    try:
+        await QuestionService().generate_questions(
+            topic_id=topic_id,
+            context_chunks=context_chunks,
+            count=payload.count,
+            topic_name=topic.name,
+            db=db,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
     saved_result = await db.execute(
         select(Question)
@@ -78,9 +95,7 @@ async def list_questions(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Topic not found")
 
     result = await db.execute(
-        select(Question)
-        .where(Question.topic_id == topic_id)
-        .order_by(Question.created_at.desc())
+        select(Question).where(Question.topic_id == topic_id).order_by(Question.created_at.desc())
     )
     return [QuestionResponse.model_validate(item) for item in result.scalars().all()]
 
@@ -142,3 +157,19 @@ async def approve_question(
     await db.commit()
     await db.refresh(question)
     return QuestionResponse.model_validate(question)
+
+
+@router.delete("/questions/{question_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_question(
+    question_id: uuid.UUID,
+    current_user: User = Depends(require_role(UserRole.TEACHER, UserRole.ADMIN)),
+    db: AsyncSession = Depends(get_db),
+) -> None:
+    """Delete a question from the question bank."""
+    result = await db.execute(select(Question).where(Question.id == question_id))
+    question = result.scalar_one_or_none()
+    if question is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Question not found")
+
+    await db.delete(question)
+    await db.commit()

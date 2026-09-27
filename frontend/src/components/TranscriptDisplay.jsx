@@ -1,0 +1,1 @@
+export default function TranscriptDisplay({ transcript }) { return <section className="transcript-box" aria-live="polite"><span className="eyebrow">Your transcript</span><p>{transcript || 'No speech was detected. Try recording your answer again.'}</p></section> }

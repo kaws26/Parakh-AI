@@ -26,6 +26,7 @@ async def record_consent(
         session_id=payload.session_id,
         audio_retention_consent=payload.audio_retention_consent,
         transcript_consent=payload.transcript_consent,
+        camera_analysis_consent=payload.camera_analysis_consent,
         consented_at=datetime.now(UTC),
     )
     db.add(consent)

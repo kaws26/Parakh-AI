@@ -2,6 +2,10 @@
 
 import pytest
 from httpx import AsyncClient
+from sqlalchemy import select
+
+from app.main import app
+from app.models.user import User, UserRole
 
 
 async def create_user_and_get_token(client: AsyncClient, email: str, role: str, name: str) -> str:
@@ -12,10 +16,15 @@ async def create_user_and_get_token(client: AsyncClient, email: str, role: str, 
             "email": email,
             "password": "password1234",
             "full_name": name,
-            "role": role,
+            "role": "student",
         },
     )
     assert response.status_code == 201
+    if role == "teacher":
+        database = app.state.test_db_session
+        account = (await database.execute(select(User).where(User.email == email))).scalar_one()
+        account.role = UserRole.TEACHER
+        await database.commit()
     return response.json()["access_token"]
 
 

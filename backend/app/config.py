@@ -1,6 +1,7 @@
 """Application configuration and settings."""
 
 from functools import lru_cache
+from pathlib import Path
 
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -10,7 +11,7 @@ class Settings(BaseSettings):
     """Application settings loaded from environment variables and .env file."""
 
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=Path(__file__).resolve().parents[2] / ".env",
         env_file_encoding="utf-8",
         extra="ignore",
     )
@@ -29,9 +30,10 @@ class Settings(BaseSettings):
     # CORS
     CORS_ORIGINS: list[str] | str = ["http://localhost:5173", "http://127.0.0.1:5173"]
 
-    # Optional integrations
-    GEMINI_API_KEY: str | None = None
+    # Local AI services
     OLLAMA_BASE_URL: str = "http://localhost:11434"
+    OLLAMA_MODEL: str = "llama3.2:3b"
+    WHISPER_MODEL: str = "base"
 
     @field_validator("CORS_ORIGINS", mode="before")
     @classmethod

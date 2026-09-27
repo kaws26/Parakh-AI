@@ -1,0 +1,2 @@
+import { useEffect, useState } from 'react'
+export default function Timer({ startedAt }) { const [seconds, setSeconds] = useState(0); useEffect(() => { const tick = () => setSeconds(Math.floor((Date.now() - startedAt) / 1000)); tick(); const id = setInterval(tick, 1000); return () => clearInterval(id) }, [startedAt]); return <span className="timer" aria-label={`Elapsed time ${Math.floor(seconds / 60)} minutes ${seconds % 60} seconds`}>{String(Math.floor(seconds / 60)).padStart(2, '0')}:{String(seconds % 60).padStart(2, '0')}</span> }

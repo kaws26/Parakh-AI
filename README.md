@@ -31,7 +31,7 @@ flowchart LR
         SPEECH["Speech Service (faster-whisper)"]
         RAG["RAG Service (MiniLM + FAISS)"]
         EVAL["Eval Engine (Hybrid Scoring)"]
-        LLM["LLM Provider (Gemini / Ollama)"]
+        LLM["Local Ollama provider"]
     end
 
     subgraph Storage
@@ -95,6 +95,17 @@ flowchart LR
 ### Prerequisites
 - **Python 3.11+**
 - **Node.js 18+** & **npm**
+- **Ollama** with the local `llama3.2:3b` model (free local inference)
+- A working webcam and microphone for the live interview
+
+### Local AI setup
+The backend uses Ollama locally for question generation, answer scoring, and adaptive follow-ups. It uses faster-whisper locally for transcription. No paid AI API key is required. Install Ollama, then run:
+
+```bash
+ollama pull llama3.2:3b
+```
+
+Copy `.env.example` to `.env` if you do not have a local `.env` yet. Set a private random `SECRET_KEY`; the checked-out development `.env` is ignored by Git. The backend reads the project-root `.env` when started from the documented runner. Run `alembic upgrade head` from `backend/` after updating an existing database to add camera analysis consent.
 
 ### Option 1: One-Command Runner
 To start both the backend and frontend simultaneously:

@@ -1,0 +1,18 @@
+# Runtime dependencies (kept in sync with [project.dependencies] in pyproject.toml)
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
+sqlalchemy>=2.0.36
+aiosqlite>=0.20.0
+alembic>=1.14.0
+pydantic>=2.10.0
+pydantic-settings>=2.7.0
+python-dotenv>=1.0.1
+bcrypt>=4.0.0
+pyjwt>=2.8.0
+email-validator>=2.0.0
+python-multipart>=0.0.9
+pypdf>=5.0.0
+pymupdf>=1.24.0
+numpy>=1.26.0
+sentence-transformers>=3.0.0
+faiss-cpu>=1.8.0

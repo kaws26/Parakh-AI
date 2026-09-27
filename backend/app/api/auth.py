@@ -5,7 +5,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, get_db
-from app.models.user import User
+from app.models.user import User, UserRole
 from app.schemas.user import TokenResponse, UserCreate, UserLogin, UserResponse
 from app.services.auth_service import create_access_token, hash_password, verify_password
 
@@ -17,7 +17,12 @@ async def register(
     payload: UserCreate,
     db: AsyncSession = Depends(get_db),
 ) -> TokenResponse:
-    """Register a new student or teacher account."""
+    """Register a public student account."""
+    if payload.role != UserRole.STUDENT:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Public registration is limited to student accounts",
+        )
     existing_user_query = await db.execute(select(User).where(User.email == payload.email))
     if existing_user_query.scalar_one_or_none() is not None:
         raise HTTPException(

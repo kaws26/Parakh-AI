@@ -25,7 +25,9 @@ async def delete_user_audio(
 ) -> dict[str, int | str]:
     """Delete all stored audio for a user and clear the answer audio paths."""
     if current_user.id != user_id:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You can only delete your own audio files")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail="You can only delete your own audio files"
+        )
 
     result = await db.execute(
         select(Answer)

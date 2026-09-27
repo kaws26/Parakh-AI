@@ -46,6 +46,7 @@ class Consent(Base):
         default=True,
         nullable=False,
     )
+    camera_analysis_consent: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     consented_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(UTC),

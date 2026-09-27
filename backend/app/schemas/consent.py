@@ -11,6 +11,7 @@ class ConsentCreate(BaseModel):
 
     audio_retention_consent: bool = False
     transcript_consent: bool = True
+    camera_analysis_consent: bool = False
     session_id: uuid.UUID | None = None
 
 
@@ -24,5 +25,6 @@ class ConsentResponse(BaseModel):
     session_id: uuid.UUID | None
     audio_retention_consent: bool
     transcript_consent: bool
+    camera_analysis_consent: bool
     consented_at: datetime
     revoked_at: datetime | None

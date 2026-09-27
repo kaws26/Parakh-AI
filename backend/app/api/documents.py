@@ -43,7 +43,9 @@ async def upload_document(
 
     try:
         saved = await DocumentService.save_upload(file, topic_id)
-        content = DocumentService.extract_text(file.filename or "document.txt", saved["raw_content"])
+        content = DocumentService.extract_text(
+            file.filename or "document.txt", saved["raw_content"]
+        )
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
@@ -73,7 +75,9 @@ async def list_documents(
     if topic_result.scalar_one_or_none() is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Topic not found")
 
-    result = await db.execute(select(Document).where(Document.topic_id == topic_id).order_by(Document.created_at.desc()))
+    result = await db.execute(
+        select(Document).where(Document.topic_id == topic_id).order_by(Document.created_at.desc())
+    )
     documents = result.scalars().all()
     return [DocumentResponse.model_validate(item) for item in documents]
 
@@ -92,7 +96,9 @@ async def embed_document(
 
     file_path = Path(document.file_path)
     if not file_path.exists():
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Stored file no longer exists")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Stored file no longer exists"
+        )
 
     try:
         text = DocumentService.extract_text(document.filename, file_path.read_bytes())

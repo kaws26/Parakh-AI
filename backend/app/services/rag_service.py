@@ -1,123 +1,264 @@
-"""Chunking, embedding, and retrieval helpers for RAG-backed questions."""
+"""Chunking, embedding, and retrieval helpers for RAG-backed viva questions."""
 
 from __future__ import annotations
 
 import json
-import math
+import logging
 import re
+import uuid
 from pathlib import Path
+from typing import Any
+
+import numpy as np
+
+logger = logging.getLogger(__name__)
+
+EMBEDDING_DIM = 384
+_SENTENCE_TRANSFORMER_MODEL = None
+
+
+def _get_transformer_model():
+    """Lazily load the sentence transformer model only from local cache."""
+    global _SENTENCE_TRANSFORMER_MODEL
+    if _SENTENCE_TRANSFORMER_MODEL is None:
+        try:
+            from sentence_transformers import SentenceTransformer
+
+            _SENTENCE_TRANSFORMER_MODEL = SentenceTransformer(
+                "all-MiniLM-L6-v2",
+                local_files_only=True,
+            )
+        except Exception as exc:
+            logger.info("SentenceTransformer local model unavailable (%s); using deterministic fallback.", exc)
+            _SENTENCE_TRANSFORMER_MODEL = False
+    return _SENTENCE_TRANSFORMER_MODEL if _SENTENCE_TRANSFORMER_MODEL is not False else None
 
 
 def _tokenize(text: str) -> list[str]:
-    """Return normalized lower-case tokens for lightweight, dependency-free RAG."""
+    """Tokenize text into lowercase word tokens."""
     return re.findall(r"\b[\w'-]+\b", text.lower())
 
 
 def chunk_text(text: str, chunk_size: int = 512, overlap: int = 64) -> list[str]:
-    """Split a document into overlapping chunks using a simple token window."""
+    """Split a document into overlapping chunks using a recursive text splitter strategy.
+
+    Splits progressively along paragraph boundaries, sentence boundaries, and word tokens.
+    """
     if not text or not text.strip():
         return []
 
-    tokens = _tokenize(text)
-    if not tokens:
-        return []
-    if len(tokens) <= chunk_size:
-        return [" ".join(tokens)]
+    stripped = text.strip()
+    words = stripped.split()
+    if len(words) <= chunk_size:
+        return [stripped]
 
-    step = max(1, chunk_size - overlap)
+    # Split by paragraphs first
+    paragraphs = [p.strip() for p in re.split(r"\n\s*\n", stripped) if p.strip()]
+    if not paragraphs:
+        paragraphs = [stripped]
+
+    units: list[str] = []
+    for para in paragraphs:
+        para_words = para.split()
+        if len(para_words) <= chunk_size:
+            units.append(para)
+        else:
+            # Split paragraph by sentences
+            sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", para) if s.strip()]
+            for sentence in sentences:
+                sent_words = sentence.split()
+                if len(sent_words) <= chunk_size:
+                    units.append(sentence)
+                else:
+                    # Split long sentences by word tokens
+                    for i in range(0, len(sent_words), max(1, chunk_size - overlap)):
+                        chunk_words = sent_words[i : i + chunk_size]
+                        if chunk_words:
+                            units.append(" ".join(chunk_words))
+
+    # Recombine units into chunks up to chunk_size with overlap
     chunks: list[str] = []
-    for start in range(0, len(tokens), step):
-        end = min(len(tokens), start + chunk_size)
-        chunk = " ".join(tokens[start:end])
-        if chunk:
-            chunks.append(chunk)
-        if end == len(tokens):
+    step = max(1, chunk_size - overlap)
+
+    # Flatten all units into word tokens with preserved punctuation
+    all_words = " ".join(units).split()
+    if not all_words:
+        return []
+
+    for start in range(0, len(all_words), step):
+        chunk_words = all_words[start : start + chunk_size]
+        if chunk_words:
+            chunks.append(" ".join(chunk_words))
+        if start + chunk_size >= len(all_words):
             break
+
     return chunks
 
 
-def _vector_from_text(text: str, dimension: int = 8) -> list[float]:
-    """Create a deterministic embedding-like vector from text content."""
+def _deterministic_vector(text: str, dimension: int = EMBEDDING_DIM) -> np.ndarray:
+    """Fallback deterministic vector generator when neural models are offline."""
     tokens = _tokenize(text)
     if not tokens:
-        return [0.0] * dimension
+        return np.zeros(dimension, dtype="float32")
 
-    vector = [0.0] * dimension
+    vector = np.zeros(dimension, dtype="float32")
     for token in tokens:
-        bucket = sum(ord(ch) for ch in token) % dimension
-        vector[bucket] += 1.0
+        # Distribute token character values across dimensions
+        h1 = sum(ord(ch) * (31**i) for i, ch in enumerate(token[:8])) % dimension
+        h2 = sum(ord(ch) for ch in token) % dimension
+        vector[h1] += 1.0
+        vector[h2] += 0.5
 
-    norm = math.sqrt(sum(value * value for value in vector))
-    if norm == 0:
-        return [0.0] * dimension
-    return [value / norm for value in vector]
+    norm = np.linalg.norm(vector)
+    if norm > 0:
+        vector = vector / norm
+    return vector.astype("float32")
 
 
-def cosine_similarity(a: list[float], b: list[float]) -> float:
+def embed_chunks(chunks: list[str]) -> np.ndarray:
+    """Generate dense embeddings for a list of text chunks.
+
+    Returns an (N, 384) float32 numpy array, L2-normalized for cosine similarity.
+    """
+    if not chunks:
+        return np.empty((0, EMBEDDING_DIM), dtype="float32")
+
+    model = _get_transformer_model()
+    if model is not None:
+        try:
+            embeddings = model.encode(chunks, convert_to_numpy=True, normalize_embeddings=True)
+            return embeddings.astype("float32")
+        except Exception as exc:
+            logger.warning(
+                "Neural embedding failed (%s); falling back to deterministic vectors.", exc
+            )
+
+    vectors = [_deterministic_vector(chunk) for chunk in chunks]
+    matrix = np.array(vectors, dtype="float32")
+    # Normalize L2
+    norms = np.linalg.norm(matrix, axis=1, keepdims=True)
+    norms[norms == 0] = 1.0
+    return (matrix / norms).astype("float32")
+
+
+def cosine_similarity(a: list[float] | np.ndarray, b: list[float] | np.ndarray) -> float:
     """Compute cosine similarity between two float vectors."""
-    if len(a) != len(b):
-        return 0.0
+    vec_a = np.asarray(a, dtype="float32")
+    vec_b = np.asarray(b, dtype="float32")
 
-    dot = sum(x * y for x, y in zip(a, b, strict=False))
-    mag_a = math.sqrt(sum(x * x for x in a))
-    mag_b = math.sqrt(sum(x * x for x in b))
-    if mag_a == 0 or mag_b == 0:
+    norm_a = np.linalg.norm(vec_a)
+    norm_b = np.linalg.norm(vec_b)
+    if norm_a == 0 or norm_b == 0:
         return 0.0
-    return dot / (mag_a * mag_b)
+    return float(np.dot(vec_a, vec_b) / (norm_a * norm_b))
+
+
+def build_index(
+    topic_id: str | uuid.UUID,
+    chunks: list[str],
+    index_dir: str | Path | None = None,
+) -> dict[str, Any]:
+    """Build a FAISS vector index for a topic's chunks and persist it to disk."""
+    import faiss
+
+    dest_dir = Path(index_dir) if index_dir is not None else Path("vector_store")
+    dest_dir.mkdir(parents=True, exist_ok=True)
+
+    if not chunks:
+        # Create empty index
+        index = faiss.IndexFlatIP(EMBEDDING_DIM)
+        embeddings_list: list[list[float]] = []
+    else:
+        embeddings = embed_chunks(chunks)
+        index = faiss.IndexFlatIP(EMBEDDING_DIM)
+        index.add(embeddings)
+        embeddings_list = embeddings.tolist()
+
+    # Save FAISS index
+    index_file = dest_dir / f"topic_{topic_id}.faiss"
+    faiss.write_index(index, str(index_file))
+
+    # Save chunks metadata
+    metadata = {
+        "topic_id": str(topic_id),
+        "chunk_count": len(chunks),
+        "chunks": chunks,
+        "embeddings": embeddings_list,
+    }
+    meta_file = dest_dir / f"topic_{topic_id}.json"
+    meta_file.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+
+    return metadata
+
+
+def load_index(
+    topic_id: str | uuid.UUID,
+    index_dir: str | Path | None = None,
+) -> tuple[Any | None, list[str]]:
+    """Load the FAISS index and chunk texts for a topic."""
+    import faiss
+
+    dest_dir = Path(index_dir) if index_dir is not None else Path("vector_store")
+    index_file = dest_dir / f"topic_{topic_id}.faiss"
+    meta_file = dest_dir / f"topic_{topic_id}.json"
+
+    chunks: list[str] = []
+    if meta_file.exists():
+        try:
+            data = json.loads(meta_file.read_text(encoding="utf-8"))
+            chunks = data.get("chunks", [])
+        except Exception as exc:
+            logger.warning("Failed to load topic metadata (%s): %s", meta_file, exc)
+
+    index = None
+    if index_file.exists():
+        try:
+            index = faiss.read_index(str(index_file))
+        except Exception as exc:
+            logger.warning("Failed to load FAISS index (%s): %s", index_file, exc)
+
+    return index, chunks
 
 
 def retrieve_relevant_chunks(
     query: str,
     chunks: list[str],
-    top_k: int = 3,
-) -> list[dict[str, float | str]]:
-    """Rank chunks by similarity to the submitted query and return the best matches."""
+    top_k: int = 5,
+) -> list[dict[str, Any]]:
+    """Rank in-memory chunks by cosine similarity to query."""
     if not chunks:
         return []
 
-    query_vector = _vector_from_text(query)
-    scored: list[dict[str, float | str]] = []
-    for chunk in chunks:
-        chunk_vector = _vector_from_text(chunk)
-        scored.append(
-            {
-                "text": chunk,
-                "score": cosine_similarity(query_vector, chunk_vector),
-            }
-        )
+    query_emb = embed_chunks([query])[0]
+    chunk_embs = embed_chunks(chunks)
 
-    scored.sort(key=lambda item: float(item["score"]), reverse=True)
+    scored: list[dict[str, Any]] = []
+    for chunk, emb in zip(chunks, chunk_embs, strict=False):
+        score = float(np.dot(query_emb, emb))
+        scored.append({"text": chunk, "score": score})
+
+    scored.sort(key=lambda x: x["score"], reverse=True)
     return scored[:top_k]
 
 
-def build_index(topic_id: str | object, chunks: list[str], index_dir: str | Path | None = None) -> dict:
-    """Persist chunk embeddings to disk for later retrieval and question generation."""
-    if index_dir is None:
-        index_dir = Path("vector_store")
-    else:
-        index_dir = Path(index_dir)
+def retrieve_for_topic(
+    topic_id: str | uuid.UUID,
+    query: str,
+    top_k: int = 5,
+    index_dir: str | Path | None = None,
+) -> list[dict[str, Any]]:
+    """Query a topic's persisted FAISS index to retrieve the top-k chunks."""
+    index, chunks = load_index(topic_id, index_dir=index_dir)
+    if index is None or not chunks:
+        return []
 
-    index_dir.mkdir(parents=True, exist_ok=True)
-    payload = {
-        "topic_id": str(topic_id),
-        "chunks": chunks,
-        "embeddings": [_vector_from_text(chunk) for chunk in chunks],
-    }
+    query_emb = embed_chunks([query])
+    k = min(top_k, len(chunks))
+    distances, indices = index.search(query_emb, k)
 
-    target = index_dir / f"topic_{topic_id}.json"
-    target.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    return payload
+    results: list[dict[str, Any]] = []
+    for dist, idx in zip(distances[0], indices[0], strict=False):
+        if 0 <= idx < len(chunks):
+            results.append({"text": chunks[idx], "score": float(dist)})
 
-
-def load_index(topic_id: str | object, index_dir: str | Path | None = None) -> dict | None:
-    """Load a saved topic index from disk when present."""
-    if index_dir is None:
-        index_dir = Path("vector_store")
-    else:
-        index_dir = Path(index_dir)
-
-    target = index_dir / f"topic_{topic_id}.json"
-    if not target.exists():
-        return None
-
-    return json.loads(target.read_text(encoding="utf-8"))
+    return results

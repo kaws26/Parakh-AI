@@ -10,7 +10,9 @@ from tests.test_courses import create_user_and_get_token
 
 
 @pytest.mark.asyncio
-async def test_start_session_and_submit_answer_with_consent(client: AsyncClient, db_session) -> None:
+async def test_start_session_and_submit_answer_with_consent(
+    client: AsyncClient, db_session, monkeypatch
+) -> None:
     """Students can start a viva session and submit an answer when consent is recorded."""
     teacher_token = await create_user_and_get_token(
         client, "viva.teacher@viva.edu", "teacher", "Viva Teacher"
@@ -39,6 +41,21 @@ async def test_start_session_and_submit_answer_with_consent(client: AsyncClient,
     await db_session.commit()
     await db_session.refresh(question)
 
+    class LocalJudge:
+        async def generate(self, prompt: str, schema: dict | None = None):
+            return {"question": "What limitation can arise from this greedy choice?", "key_points": ["optimality"], "difficulty": "medium"}
+
+    monkeypatch.setattr("app.services.llm_service.get_provider", lambda: LocalJudge())
+    monkeypatch.setattr("app.services.viva_orchestrator.get_provider", lambda: LocalJudge())
+    async def low_score(**kwargs):
+        return {"embedding_score": 0.1, "llm_score": 0.2, "fused_score": 0.16, "rubric": {"correctness": 2}}
+
+    monkeypatch.setattr("app.api.viva.evaluate_answer", low_score)
+    monkeypatch.setattr("app.api.viva.SpeechService.transcribe", lambda self, path: {
+        "text": "A greedy algorithm makes a locally optimal choice.", "confidence": 0.9,
+        "segments": [], "duration_ms": 900,
+    })
+
     session = await client.post(
         "/api/viva/sessions",
         headers={"Authorization": f"Bearer {student_token}"},
@@ -53,6 +70,7 @@ async def test_start_session_and_submit_answer_with_consent(client: AsyncClient,
             "session_id": session_id,
             "audio_retention_consent": True,
             "transcript_consent": True,
+            "camera_analysis_consent": True,
         },
     )
     assert consent.status_code == 201, consent.text
@@ -67,16 +85,45 @@ async def test_start_session_and_submit_answer_with_consent(client: AsyncClient,
     data = audio.json()
     assert "transcript" in data
     assert data["audio_saved"] is True
+    assert data["followup"]["question_text"] == "What limitation can arise from this greedy choice?"
 
-    res4 = await client.post(f"/api/viva/sessions/{session_id}/next", headers={"Authorization": f"Bearer {student_token}"})
-    assert res4.status_code == 501
+    cue = await client.post(
+        f"/api/viva/sessions/{session_id}/behavior-flags",
+        headers={"Authorization": f"Bearer {student_token}"},
+        json={"cue_type": "additional_faces"},
+    )
+    assert cue.status_code == 201, cue.text
+    assert cue.json()["cue_type"] == "additional_faces"
 
-    res5 = await client.post(f"/api/viva/sessions/{session_id}/finish", headers={"Authorization": f"Bearer {student_token}"})
-    assert res5.status_code == 501
+    next_question = await client.post(
+        f"/api/viva/sessions/{session_id}/next",
+        headers={"Authorization": f"Bearer {student_token}"},
+    )
+    assert next_question.status_code == 200, next_question.text
+    payload = next_question.json()
+    assert payload["question_id"] == data["followup"]["question_id"]
+    assert payload["question_text"] == data["followup"]["question_text"]
+    assert payload["session_id"] == session_id
+
+    finish = await client.post(
+        f"/api/viva/sessions/{session_id}/finish",
+        headers={"Authorization": f"Bearer {student_token}"},
+    )
+    assert finish.status_code == 200, finish.text
+    summary = finish.json()
+    assert summary["status"] == "completed"
+    assert summary["total_score"] >= 0.0
+
+    review = await client.get(
+        f"/api/viva/sessions/{session_id}/report",
+        headers={"Authorization": f"Bearer {student_token}"},
+    )
+    assert review.status_code == 200
+    assert review.json()["behavior_flags"][0]["cue_type"] == "additional_faces"
 
 
 @pytest.mark.asyncio
-async def test_delete_user_audio_removes_recorded_files(client: AsyncClient, db_session) -> None:
+async def test_delete_user_audio_removes_recorded_files(client: AsyncClient, db_session, monkeypatch) -> None:
     """Audio deletion should remove saved audio and clear audio_path records for that user."""
     teacher_token = await create_user_and_get_token(
         client, "viva.teacher.delete@viva.edu", "teacher", "Viva Teacher Delete"
@@ -104,6 +151,16 @@ async def test_delete_user_audio_removes_recorded_files(client: AsyncClient, db_
     db_session.add(question)
     await db_session.commit()
     await db_session.refresh(question)
+
+    class LocalJudge:
+        async def generate(self, prompt: str, schema: dict | None = None):
+            return {"correctness": 6, "completeness": 6, "clarity": 6, "justification": "Practice response."}
+
+    monkeypatch.setattr("app.services.llm_service.get_provider", lambda: LocalJudge())
+    monkeypatch.setattr("app.api.viva.SpeechService.transcribe", lambda self, path: {
+        "text": "Association rules measure support and confidence.", "confidence": 0.9,
+        "segments": [], "duration_ms": 900,
+    })
 
     session = await client.post("/api/viva/sessions", headers={"Authorization": f"Bearer {token}"})
     assert session.status_code == 201

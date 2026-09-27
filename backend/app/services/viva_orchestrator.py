@@ -1,0 +1,311 @@
+"""State-machine orchestration for viva sessions."""
+
+from __future__ import annotations
+
+import uuid
+from datetime import UTC, datetime
+from typing import Any
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.models.answer import Answer
+from app.models.question import Question, QuestionDifficulty
+from app.models.topic import Topic
+from app.models.viva_session import VivaSession, VivaStatus
+from app.schemas.viva import VivaConfig
+from app.services.eval_service import evaluate_answer
+from app.services.llm_service import get_provider
+from app.services.speech_service import SpeechService
+from app.utils.text import anonymise, clean_transcript
+
+
+class VivaOrchestrator:
+    """Manage the question flow and scoring lifecycle for a viva session."""
+
+    def __init__(self, db: AsyncSession) -> None:
+        self.db = db
+
+    async def _get_session(self, session_id: uuid.UUID) -> VivaSession | None:
+        result = await self.db.execute(select(VivaSession).where(VivaSession.id == session_id))
+        return result.scalar_one_or_none()
+
+    async def _course_question_ids(self, course_id: uuid.UUID) -> list[uuid.UUID]:
+        result = await self.db.execute(
+            select(Question.id)
+            .join(Topic, Question.topic_id == Topic.id)
+            .where(Topic.course_id == course_id)
+        )
+        question_ids = result.scalars().all()
+        ordered = sorted(
+            question_ids,
+            key=lambda question_id: self._question_sort_key(question_id),
+        )
+        return ordered
+
+    @staticmethod
+    def _question_sort_key(question_id: uuid.UUID) -> tuple[int, datetime, uuid.UUID]:
+        return (0, datetime.min.replace(tzinfo=UTC), question_id)
+
+    async def _ensure_question_order(self, session: VivaSession) -> list[uuid.UUID]:
+        question_order = [
+            uuid.UUID(value) for value in session.config.get("question_order", []) if value
+        ]
+        if question_order:
+            return question_order
+
+        course_question_ids = await self._course_question_ids(session.course_id)
+        session.config["question_order"] = [str(item) for item in course_question_ids]
+        await self.db.commit()
+        return course_question_ids
+
+    async def start_session(
+        self,
+        student_id: uuid.UUID,
+        course_id: uuid.UUID,
+        config: VivaConfig | None = None,
+    ) -> VivaSession:
+        """Create a viva session and cache the initial order of reusable questions."""
+        viva_config = config or VivaConfig()
+        question_order = await self._course_question_ids(course_id)
+
+        session = VivaSession(
+            student_id=student_id,
+            course_id=course_id,
+            status=VivaStatus.IN_PROGRESS,
+            max_questions=viva_config.max_questions,
+            max_duration_sec=viva_config.max_duration_sec,
+            current_question_index=0,
+            started_at=datetime.now(UTC),
+            config={
+                "question_order": [str(item) for item in question_order],
+                "max_questions": viva_config.max_questions,
+                "max_duration_sec": viva_config.max_duration_sec,
+                "follow_up_threshold": viva_config.follow_up_threshold,
+            },
+        )
+        self.db.add(session)
+        await self.db.commit()
+        await self.db.refresh(session)
+        return session
+
+    async def get_next_question(self, session_id: uuid.UUID) -> Question | None:
+        """Return the next question for a session or auto-finish when the limit is reached."""
+        session = await self._get_session(session_id)
+        if session is None:
+            raise ValueError("Session not found")
+
+        if session.status == VivaStatus.COMPLETED:
+            return None
+
+        if session.current_question_index >= session.max_questions:
+            await self.finish_session(session_id)
+            return None
+
+        question_order = await self._ensure_question_order(session)
+        if not question_order:
+            await self.finish_session(session_id)
+            return None
+
+        if session.current_question_index >= len(question_order):
+            await self.finish_session(session_id)
+            return None
+
+        question_id = question_order[session.current_question_index]
+        question_result = await self.db.execute(select(Question).where(Question.id == question_id))
+        question = question_result.scalar_one_or_none()
+        if question is None:
+            await self.finish_session(session_id)
+            return None
+
+        session.current_question_index += 1
+        await self.db.commit()
+        await self.db.refresh(session)
+        return question
+
+    async def finish_session(self, session_id: uuid.UUID) -> dict[str, Any]:
+        """Compute the final weighted score and mark the session complete."""
+        session = await self._get_session(session_id)
+        if session is None:
+            raise ValueError("Session not found")
+
+        answers_result = await self.db.execute(
+            select(Answer).where(Answer.session_id == session_id).order_by(Answer.sequence_number)
+        )
+        answers = list(answers_result.scalars().all())
+
+        if answers:
+            scores = [
+                answer.fused_score
+                if answer.fused_score is not None
+                else (answer.llm_score if answer.llm_score is not None else answer.embedding_score or 0.0)
+                for answer in answers
+            ]
+            total_score = sum(scores) / len(scores)
+        else:
+            total_score = 0.0
+
+        session.total_score = round(float(total_score), 4)
+        session.status = VivaStatus.COMPLETED
+        session.finished_at = datetime.now(UTC)
+        session.current_question_index = max(session.current_question_index, len(answers))
+        await self.db.commit()
+        await self.db.refresh(session)
+
+        return {
+            "session_id": str(session.id),
+            "status": session.status.value,
+            "total_score": session.total_score,
+            "answers_count": len(answers),
+            "finished_at": session.finished_at,
+        }
+
+    async def process_answer(
+        self,
+        session_id: uuid.UUID,
+        audio_file: Any,
+        question_id: uuid.UUID | None = None,
+        user_id: uuid.UUID | None = None,
+    ) -> dict[str, Any]:
+        """Process an uploaded answer, transcribe it, score it, and persist the record."""
+        session = await self._get_session(session_id)
+        if session is None:
+            raise ValueError("Session not found")
+
+        if question_id is None:
+            question_ids = await self._ensure_question_order(session)
+            next_index = min(session.current_question_index, max(len(question_ids) - 1, 0))
+            if next_index < len(question_ids):
+                chosen_question_id = question_ids[next_index]
+            else:
+                chosen_question_id = None
+        else:
+            chosen_question_id = question_id
+
+        if chosen_question_id is None:
+            raise ValueError("No available question for this session")
+
+        question_result = await self.db.execute(select(Question).where(Question.id == chosen_question_id))
+        question = question_result.scalar_one_or_none()
+        if question is None:
+            raise ValueError("Question not found")
+
+        raw_bytes = await audio_file.read()
+        if not raw_bytes:
+            raise ValueError("Uploaded audio is empty")
+
+        if user_id is None:
+            user_id = session.student_id
+
+        stored_path = SpeechService.save_audio_upload(raw_bytes, session_id, user_id)
+        transcription = SpeechService().transcribe(stored_path)
+        transcript = clean_transcript(transcription.get("text", ""))
+        transcript = anonymise(transcript)
+
+        evaluation = await evaluate_answer(
+            question=question.question_text,
+            transcript=transcript,
+            key_points=question.expected_key_points,
+        )
+
+        existing_answers = (await self.db.execute(select(Answer).where(Answer.session_id == session_id))).scalars().all()
+        next_sequence = len(existing_answers) + 1
+        answer = Answer(
+            session_id=session.id,
+            question_id=question.id,
+            sequence_number=next_sequence,
+            transcript=transcript,
+            embedding_score=evaluation["embedding_score"],
+            llm_score=evaluation["llm_score"],
+            fused_score=evaluation["fused_score"],
+            rubric_breakdown=evaluation["rubric"],
+            llm_raw_response=evaluation["rubric"],
+            audio_path=stored_path,
+            transcription_confidence=transcription.get("confidence"),
+            latency_ms=transcription.get("duration_ms"),
+        )
+        self.db.add(answer)
+        await self.db.commit()
+        await self.db.refresh(answer)
+
+        return {
+            "answer_id": str(answer.id),
+            "question_id": str(question.id),
+            "transcript": transcript,
+            "confidence": transcription.get("confidence"),
+            "fused_score": evaluation["fused_score"],
+            "rubric": evaluation["rubric"],
+        }
+
+    async def generate_followup(
+        self,
+        session_id: uuid.UUID,
+        missed_key_points: list[str] | None = None,
+        previous_question: str | None = None,
+        transcript: str | None = None,
+    ) -> Question | None:
+        """Create and queue a locally generated follow-up when the answer needs probing."""
+        session = await self._get_session(session_id)
+        if session is None:
+            raise ValueError("Session not found")
+
+        points = missed_key_points or ["core concept coverage"]
+        schema = {
+            "type": "object",
+            "properties": {
+                "question": {"type": "string"},
+                "key_points": {"type": "array", "items": {"type": "string"}},
+                "difficulty": {"type": "string", "enum": ["easy", "medium", "hard"]},
+            },
+            "required": ["question", "key_points", "difficulty"],
+        }
+        prompt = (
+            "You are conducting a supportive oral exam. Ask one concise follow-up question that "
+            "probes a concept the student did not explain well. Do not repeat the original question. "
+            f"Original question: {previous_question or 'Explain the topic.'}\n"
+            f"Student answer: {transcript or '(no transcript)'}\n"
+            f"Concepts needing clarification: {', '.join(str(point) for point in points[:3])}\n"
+            "Return the requested JSON object."
+        )
+        response = await get_provider().generate(prompt, schema=schema)
+        followup_text = str(response.get("question", "")).strip() if isinstance(response, dict) else ""
+        if not followup_text:
+            return None
+        key_points = response.get("key_points", points) if isinstance(response, dict) else points
+        difficulty_name = response.get("difficulty", "easy") if isinstance(response, dict) else "easy"
+        try:
+            difficulty = QuestionDifficulty(difficulty_name)
+        except ValueError:
+            difficulty = QuestionDifficulty.EASY
+
+        followup_question = Question(
+            topic_id=next(
+                iter(
+                    (
+                        await self.db.execute(
+                            select(Topic.id).where(Topic.course_id == session.course_id).limit(1)
+                        )
+                    ).scalars().all()
+                ),
+                None,
+            ),
+            question_text=followup_text,
+            expected_key_points=list(key_points) if isinstance(key_points, list) else list(points),
+            difficulty=difficulty,
+            is_approved=True,
+            generated_by=session.student_id,
+            prompt_version="followup_v1",
+        )
+        if followup_question.topic_id is None:
+            return None
+
+        self.db.add(followup_question)
+        await self.db.commit()
+        await self.db.refresh(followup_question)
+        config = dict(session.config or {})
+        order = list(config.get("question_order", []))
+        order.insert(session.current_question_index, str(followup_question.id))
+        config["question_order"] = order
+        session.config = config
+        await self.db.commit()
+        return followup_question

@@ -17,7 +17,7 @@ if TYPE_CHECKING:
     from app.models.user import User
 
 
-class VivaStatus(str, enum.Enum):
+class VivaStatus(enum.StrEnum):
     """Lifecycle status of a viva exam session."""
 
     PENDING = "pending"

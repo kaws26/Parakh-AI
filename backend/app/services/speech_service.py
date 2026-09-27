@@ -7,6 +7,8 @@ import time
 import uuid
 from pathlib import Path
 
+from app.config import get_settings
+
 
 class SpeechService:
     """Service wrapper around local speech transcription with a lightweight fallback."""
@@ -18,20 +20,22 @@ class SpeechService:
     def _load_model(cls):
         """Load faster-whisper lazily on first use and keep it cached."""
         now = time.monotonic()
-        if cls._model is not None and now - cls._last_used < 300:
+        if cls._model is not None and cls._model is not False and now - cls._last_used < 300:
             cls._last_used = now
             return cls._model
 
         try:
             from faster_whisper import WhisperModel
 
-            cls._model = WhisperModel("base", device="cpu", compute_type="int8")
+            cls._model = WhisperModel(get_settings().WHISPER_MODEL, device="cpu", compute_type="int8")
             cls._last_used = now
             return cls._model
-        except Exception:
+        except Exception as exc:
             cls._model = False
             cls._last_used = now
-            return False
+            raise RuntimeError(
+                "Local speech transcription is unavailable. Install faster-whisper and allow its model to download."
+            ) from exc
 
     @staticmethod
     def ensure_wav(audio_path: str | Path) -> str:
@@ -58,27 +62,10 @@ class SpeechService:
         except Exception:
             return str(path)
 
-    @classmethod
-    def _fallback_transcribe(cls, audio_path: str | Path) -> dict:
-        """Fallback transcript used when the faster-whisper dependency is unavailable."""
-        filename = Path(audio_path).name.lower()
-        if "hello" in filename or "hello" in filename:
-            text = "Hello world."
-        else:
-            text = "Student response recorded successfully."
-        return {
-            "text": text,
-            "confidence": 0.82,
-            "segments": [{"text": text, "start": 0.0, "end": 1.0}],
-            "duration_ms": 1000,
-        }
-
     def transcribe(self, audio_path: str | Path) -> dict:
         """Transcribe an audio file and return structured transcript metadata."""
         normalized_path = self.ensure_wav(audio_path)
         model = self._load_model()
-        if model is False:
-            return self._fallback_transcribe(normalized_path)
 
         try:
             segments, info = model.transcribe(str(normalized_path), beam_size=5, language="en")
@@ -92,8 +79,8 @@ class SpeechService:
                 ],
                 "duration_ms": int((info.duration or 0.0) * 1000),
             }
-        except Exception:
-            return self._fallback_transcribe(normalized_path)
+        except Exception as exc:
+            raise RuntimeError("Local transcription failed. Check the audio format and Whisper model.") from exc
 
     @classmethod
     def save_audio_upload(cls, file_bytes: bytes, session_id: uuid.UUID, user_id: uuid.UUID) -> str:

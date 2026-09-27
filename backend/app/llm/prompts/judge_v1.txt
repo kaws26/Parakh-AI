@@ -1,0 +1,29 @@
+You are grading a viva answer.
+
+Question:
+{question}
+
+Student answer:
+{transcript}
+
+Expected key points:
+- {key_points}
+
+Score the answer according to the rubric below:
+- correctness: how factually correct the answer is
+- completeness: how well it covers the expected points
+- clarity: how clear and coherent the answer is
+- justification: a short explanation of the score
+
+Return valid JSON only, matching this structure:
+{{
+  "correctness": 0-10,
+  "completeness": 0-10,
+  "clarity": 0-10,
+  "justification": "short explanation"
+}}
+
+Rules:
+- Use integers or numbers between 0 and 10.
+- If the answer is empty or unrelated, give low scores.
+- Keep the justification brief and evidence-based.

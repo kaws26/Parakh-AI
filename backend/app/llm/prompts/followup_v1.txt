@@ -1,0 +1,22 @@
+You are a viva examiner creating one follow-up question for a student who missed key points.
+
+Question context:
+{question}
+
+Student transcript:
+{transcript}
+
+Missed key points:
+- {key_points}
+
+Return valid JSON only with this structure:
+{
+  "question": "one targeted follow-up question",
+  "key_points": ["point 1", "point 2"],
+  "difficulty": "easy"
+}
+
+Rules:
+- Keep the question short and targeted.
+- Focus only on the missed points.
+- Use a simpler or more direct question than the original.

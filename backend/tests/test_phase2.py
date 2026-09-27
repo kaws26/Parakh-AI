@@ -7,22 +7,13 @@ from fastapi import status
 
 from app.services.question_service import QuestionService
 from app.services.rag_service import chunk_text, retrieve_relevant_chunks
+from tests.test_courses import create_user_and_get_token
 
 
 @pytest.mark.asyncio
 async def test_document_upload_and_list(client):
     """Teachers can upload a text document to a topic and list it back."""
-    register = await client.post(
-        "/api/auth/register",
-        json={
-            "email": "teacher2@example.com",
-            "password": "teacher123",
-            "full_name": "Teacher Two",
-            "role": "teacher",
-        },
-    )
-    assert register.status_code == status.HTTP_201_CREATED
-    token = register.json()["access_token"]
+    token = await create_user_and_get_token(client, "teacher2@example.com", "teacher", "Teacher Two")
 
     course = await client.post(
         "/api/courses",
@@ -44,7 +35,13 @@ async def test_document_upload_and_list(client):
     response = await client.post(
         f"/api/topics/{topic_id}/documents",
         headers={"Authorization": f"Bearer {token}"},
-        files={"file": ("syllabus.txt", b"Cell division is crucial for growth. Mitosis produces identical cells.", "text/plain")},
+        files={
+            "file": (
+                "syllabus.txt",
+                b"Cell division is crucial for growth. Mitosis produces identical cells.",
+                "text/plain",
+            )
+        },
     )
     assert response.status_code == status.HTTP_201_CREATED
     body = response.json()
@@ -61,14 +58,16 @@ async def test_document_upload_and_list(client):
 
 def test_chunking_and_retrieval_helpers():
     """Chunking should split text into manageable units with overlap, and the retrieval helper should rank relevant content first."""
-    text = " ".join([
-        "Mitosis is the process of cell division.",
-        "During mitosis chromosomes align and separate.",
-        "Cell growth requires nutrients and energy.",
-        "The cell cycle includes interphase and mitosis.",
-        "During interphase DNA is copied.",
-        "Cell differentiation is a separate process.",
-    ])
+    text = " ".join(
+        [
+            "Mitosis is the process of cell division.",
+            "During mitosis chromosomes align and separate.",
+            "Cell growth requires nutrients and energy.",
+            "The cell cycle includes interphase and mitosis.",
+            "During interphase DNA is copied.",
+            "Cell differentiation is a separate process.",
+        ]
+    )
 
     chunks = chunk_text(text, chunk_size=18, overlap=5)
     assert len(chunks) >= 2
@@ -80,23 +79,22 @@ def test_chunking_and_retrieval_helpers():
         top_k=2,
     )
     assert relevant
-    assert relevant[0]["text"].lower().find("mitosis") >= 0 or relevant[0]["text"].lower().find("cell division") >= 0
+    assert (
+        relevant[0]["text"].lower().find("mitosis") >= 0
+        or relevant[0]["text"].lower().find("cell division") >= 0
+    )
 
 
 @pytest.mark.asyncio
-async def test_question_generation_returns_structured_questions(client):
+async def test_question_generation_returns_structured_questions(client, monkeypatch):
     """The generator should create a list of exam questions with key points and difficulty."""
-    register = await client.post(
-        "/api/auth/register",
-        json={
-            "email": "teacher3@example.com",
-            "password": "teacher123",
-            "full_name": "Teacher Three",
-            "role": "teacher",
-        },
-    )
-    assert register.status_code == status.HTTP_201_CREATED
-    token = register.json()["access_token"]
+    token = await create_user_and_get_token(client, "teacher3@example.com", "teacher", "Teacher Three")
+
+    class ApiStaticProvider:
+        async def generate(self, prompt: str, schema: dict | None = None):
+            return [{"question": "Explain motion.", "key_points": ["velocity", "acceleration"], "difficulty": "easy"}]
+
+    monkeypatch.setattr("app.services.question_service.get_provider", lambda: ApiStaticProvider())
 
     course = await client.post(
         "/api/courses",

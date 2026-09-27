@@ -1,0 +1,11 @@
+import { useEffect, useState } from 'react'
+import apiClient from '../api/client'
+export default function FeedbackReport({ sessionId, navigate }) {
+  const [report, setReport] = useState(null); const [error, setError] = useState('')
+  useEffect(() => { apiClient.get(`/api/viva/sessions/${sessionId}/report`).then(({ data }) => setReport(data)).catch((e) => setError(e.userMessage || 'The report is not available yet.')) }, [sessionId])
+  if (error) return <main className="page-shell"><p className="error-text" role="alert">{error}</p><button className="button secondary" onClick={() => navigate('/')}>Back to courses</button></main>
+  if (!report) return <main className="page-shell"><p className="muted">Preparing your feedback…</p></main>
+  const score = Number(report.total_score || 0) * 100
+  return <main className="page-shell report-shell"><p className="eyebrow">SESSION COMPLETE</p><h1>Your practice, reflected.</h1><p className="muted">Use this feedback to decide what to revisit before your next viva.</p><section className="score-hero"><div><span className="eyebrow">OVERALL SCORE</span><strong>{Math.round(score)}<small>/100</small></strong></div><div className="score-track"><i style={{ width: `${Math.min(100, score)}%` }} /></div><p>{report.answers?.length || 0} answers · Scores are automated practice feedback for teacher review.</p></section><h2>Answer breakdown</h2><div className="answer-cards">{(report.answers || []).map((answer, i) => { const value = Math.round(Number(answer.fused_score ?? answer.embedding_score ?? 0) * 100); return <article className="answer-card" key={answer.id}><div className="answer-card-head"><span>0{i + 1}</span><strong>{value}%</strong></div><h3>{answer.question_text}</h3><div className="score-track"><i style={{ width: `${value}%` }}/></div><Transcript text={answer.transcript}/>{answer.rubric_breakdown && <div className="rubric-grid">{Object.entries(answer.rubric_breakdown).filter(([,v]) => typeof v === 'number').map(([label, val]) => <span key={label}>{label}: <b>{val}/10</b></span>)}</div>}</article> })}</div><button className="button primary" onClick={() => navigate('/')}>Back to courses</button></main>
+}
+function Transcript({ text }) { return <div className="report-transcript"><span className="eyebrow">TRANSCRIPT</span><p>{text || 'No transcript available.'}</p></div> }

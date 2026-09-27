@@ -16,6 +16,11 @@ dependencies = [
     "pyjwt>=2.8.0",
     "email-validator>=2.0.0",
     "python-multipart>=0.0.9",
+    "pypdf>=5.0.0",
+    "pymupdf>=1.24.0",
+    "numpy>=1.26.0",
+    "sentence-transformers>=3.0.0",
+    "faiss-cpu>=1.8.0",
 ]
 
 [project.optional-dependencies]
