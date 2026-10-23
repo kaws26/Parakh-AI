@@ -1,5 +1,6 @@
 """Deterministic tests for the official Groq SDK adapter."""
 
+import os
 from types import SimpleNamespace
 
 import httpx
@@ -125,8 +126,11 @@ async def test_groq_provider_surfaces_auth_and_model_errors_without_provider_swi
     assert model_error.value.status_code == 502
 
 
+@pytest.mark.integration
 @pytest.mark.asyncio
 async def test_actual_groq_model_integration_when_credentials_are_available():
+    if os.getenv("RUN_GROQ_INTEGRATION", "").lower() not in {"1", "true", "yes"}:
+        pytest.skip("set RUN_GROQ_INTEGRATION=1 to run the live Groq integration test")
     if not get_settings().GROQ_API_KEY:
         pytest.skip("GROQ_API_KEY is not configured in this environment")
     result = await GroqProvider().generate("Reply with the single word READY.")
