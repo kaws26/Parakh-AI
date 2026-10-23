@@ -375,7 +375,7 @@ export default function VivaScreen({ navigate, courseId }) {
               <span className="eyebrow">INTERVIEWER · VIVA AI</span>
               <h1>Take your time, {user?.full_name?.split(' ')[0] || 'there'}.</h1>
             </div>
-            <span className="live-progress">QUESTION {questionNumber} / 5</span>
+            <span className="live-progress">QUESTION {questionNumber} / {interviewLimits.maxQuestions}</span>
           </div>
 
           <section className="video-stage" aria-label="Live interview video">
